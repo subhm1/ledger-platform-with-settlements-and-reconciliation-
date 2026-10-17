@@ -90,7 +90,7 @@ CREATE TABLE public.reversal_audits (
 CREATE FUNCTION public.guard_currency_update()
 RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog
 AS $function$
 BEGIN
     IF NEW.code IS DISTINCT FROM OLD.code THEN
@@ -117,7 +117,7 @@ FOR EACH ROW EXECUTE FUNCTION public.guard_currency_update();
 CREATE FUNCTION public.guard_account_identity()
 RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog
 AS $function$
 BEGIN
     IF NEW.account_code IS DISTINCT FROM OLD.account_code
@@ -140,7 +140,7 @@ FOR EACH ROW EXECUTE FUNCTION public.guard_account_identity();
 CREATE FUNCTION public.reject_financial_mutation()
 RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog
 AS $function$
 BEGIN
     RAISE EXCEPTION 'Posted financial records and reversal audits are immutable';
@@ -174,7 +174,7 @@ CREATE FUNCTION public.post_journal_transaction(
 RETURNS UUID
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog
 AS $function$
 DECLARE
     v_request JSONB;
@@ -357,10 +357,11 @@ BEGIN
 
     IF v_has_exception AND (
         p_reversal_of_transaction_id IS NULL
+        OR NOT pg_has_role(session_user, 'ledger_reversal_approver', 'member')
         OR p_authorized_by IS NULL OR length(trim(p_authorized_by)) = 0
         OR p_reason IS NULL OR length(trim(p_reason)) = 0
     ) THEN
-        RAISE EXCEPTION 'Non-active account reversal requires an authorizer and reason';
+        RAISE EXCEPTION 'Exceptional reversal requires approver role, authorizer and reason';
     END IF;
 
     IF p_reversal_of_transaction_id IS NOT NULL THEN
@@ -477,3 +478,9 @@ TO ledger_runtime;
 GRANT EXECUTE ON FUNCTION public.post_journal_transaction(
     TEXT, TEXT, TEXT, VARCHAR, TEXT, JSONB, UUID, TEXT, TEXT
 ) TO ledger_runtime;
+
+GRANT USAGE ON SCHEMA public TO ledger_reversal_approver;
+
+GRANT EXECUTE ON FUNCTION public.post_journal_transaction(
+    TEXT, TEXT, TEXT, VARCHAR, TEXT, JSONB, UUID, TEXT, TEXT
+) TO ledger_reversal_approver;

@@ -103,9 +103,46 @@ class LedgerPlatformApplicationTests {
                      'TEST_CUSTOMER_WALLET', 'LIABILITY', 'CUSTOMER_WALLET', 'INR')
                 ON CONFLICT (id) DO NOTHING
                 """);
+
+            statement.executeUpdate("""
+                UPDATE public.accounts
+                   SET status = 'ACTIVE'
+                 WHERE id IN (
+                    '11111111-1111-4111-8111-111111111111',
+                    '22222222-2222-4222-8222-222222222222'
+                 )
+                """);
         }
     }
 
+    private void setAccountStatus(String status) throws Exception {
+        String url = postgres.getJdbcUrl()
+                + "&options=-c%20TimeZone=Asia/Kolkata";
+
+        try (Connection connection = DriverManager.getConnection(
+                    url, "ledger_migrator", "local_migrator_password");
+             Statement statement = connection.createStatement()) {
+            statement.execute("SET ROLE ledger_owner");
+
+            try (java.sql.PreparedStatement update = connection.prepareStatement(
+                    "UPDATE public.accounts SET status = ? WHERE id = ?")) {
+                update.setString(1, status);
+                update.setObject(2, UUID.fromString(ASSET_ACCOUNT));
+                assertThat(update.executeUpdate()).isEqualTo(1);
+            }
+        }
+    }
+
+    private String reversalEntries() {
+        return """
+            [
+              {"account_id":"11111111-1111-4111-8111-111111111111",
+               "direction":"CREDIT","amount_minor":100},
+              {"account_id":"22222222-2222-4222-8222-222222222222",
+               "direction":"DEBIT","amount_minor":100}
+            ]
+            """;
+    }
     private UUID post(
             String scope,
             String key,
@@ -254,6 +291,109 @@ class LedgerPlatformApplicationTests {
         );
         assertThat(totalEntries).isEqualTo(4L);
     }
+    @Test
+    void runtimeCannotFakeAuthorizationForSuspendedAccountReversal() throws Exception {
+        String scope = UUID.randomUUID().toString();
+
+        UUID originalId = post(
+                scope, UUID.randomUUID().toString(),
+                UUID.randomUUID().toString(), balancedEntries(), null);
+
+        setAccountStatus("SUSPENDED");
+
+        String reversalReference = UUID.randomUUID().toString();
+
+        assertThatThrownBy(() -> jdbcTemplate.queryForObject(
+                """
+                SELECT public.post_journal_transaction(
+                    ?, ?, ?, ?, ?, ?::jsonb, ?::uuid, ?::text, ?::text
+                )
+                """,
+                UUID.class,
+                scope,
+                UUID.randomUUID().toString(),
+                reversalReference,
+                "INR",
+                "Exceptional reversal test",
+                reversalEntries(),
+                originalId.toString(),
+                "Fabricated Approver",
+                "Claimed approval"
+        )).isInstanceOf(DataAccessException.class)
+          .hasMessageContaining("Exceptional reversal requires approver role");
+
+        Long reversalCount = jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM public.journal_transactions WHERE transaction_reference = ?",
+                Long.class, reversalReference);
+        assertThat(reversalCount).isZero();
+    }
+
+    @Test
+    void authorizedDatabasePrincipalCanReverseSuspendedAccount() throws Exception {
+        String scope = UUID.randomUUID().toString();
+
+        UUID originalId = post(
+                scope, UUID.randomUUID().toString(),
+                UUID.randomUUID().toString(), balancedEntries(), null);
+
+        setAccountStatus("SUSPENDED");
+
+        String url = postgres.getJdbcUrl()
+                + "&options=-c%20TimeZone=Asia/Kolkata";
+        String reversalReference = UUID.randomUUID().toString();
+        UUID reversalId;
+
+        try (Connection connection = DriverManager.getConnection(
+                    url, "ledger_approver_login", "local_approver_password");
+             java.sql.PreparedStatement statement = connection.prepareStatement(
+                """
+                SELECT public.post_journal_transaction(
+                    ?, ?, ?, ?, ?, ?::jsonb, ?::uuid, ?::text, ?::text
+                )
+                """)) {
+            statement.setString(1, scope);
+            statement.setString(2, UUID.randomUUID().toString());
+            statement.setString(3, reversalReference);
+            statement.setString(4, "INR");
+            statement.setString(5, "Authorized exceptional reversal");
+            statement.setString(6, reversalEntries());
+            statement.setObject(7, originalId);
+            statement.setString(8, "finance-control-test");
+            statement.setString(9, "Approved exceptional reversal");
+
+            try (java.sql.ResultSet result = statement.executeQuery()) {
+                assertThat(result.next()).isTrue();
+                reversalId = result.getObject(1, UUID.class);
+            }
+        }
+
+        try (Connection connection = DriverManager.getConnection(
+                    url, "ledger_migrator", "local_migrator_password");
+             Statement ownerStatement = connection.createStatement()) {
+            ownerStatement.execute("SET ROLE ledger_owner");
+
+            try (java.sql.PreparedStatement auditStatement = connection.prepareStatement(
+                """
+                SELECT count(*)
+                FROM public.reversal_audits
+                WHERE original_transaction_id = ?
+                  AND reversal_transaction_id = ?
+                  AND authorized_by = ?
+                  AND reason = ?
+                """)) {
+            auditStatement.setObject(1, originalId);
+            auditStatement.setObject(2, reversalId);
+            auditStatement.setString(3, "finance-control-test");
+            auditStatement.setString(4, "Approved exceptional reversal");
+
+            try (java.sql.ResultSet result = auditStatement.executeQuery()) {
+                assertThat(result.next()).isTrue();
+                assertThat(result.getLong(1)).isEqualTo(1L);
+            }
+            }
+        }
+    }
+
     @Test
     void contextLoads() {
         assertThat(jdbcTemplate).isNotNull();

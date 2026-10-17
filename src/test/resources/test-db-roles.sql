@@ -15,6 +15,17 @@ CREATE ROLE ledger_migrator
 CREATE ROLE ledger_executor
     WITH NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
     NOREPLICATION NOBYPASSRLS;
+CREATE ROLE ledger_reversal_approver
+    WITH NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
+    NOREPLICATION NOBYPASSRLS;
+
+CREATE ROLE ledger_approver_login
+    WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
+    NOREPLICATION NOBYPASSRLS
+    PASSWORD 'local_approver_password';
+
+GRANT ledger_reversal_approver TO ledger_approver_login
+    WITH SET TRUE, INHERIT TRUE;
 
 GRANT ledger_owner TO ledger_migrator
     WITH SET TRUE, INHERIT FALSE;
@@ -25,7 +36,7 @@ GRANT ledger_executor TO ledger_owner
 ALTER DATABASE ledger OWNER TO ledger_owner;
 
 REVOKE CREATE, TEMPORARY ON DATABASE ledger FROM PUBLIC;
-GRANT CONNECT ON DATABASE ledger TO ledger_runtime, ledger_migrator;
+GRANT CONNECT ON DATABASE ledger TO ledger_runtime, ledger_migrator, ledger_approver_login;
 
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-GRANT USAGE ON SCHEMA public TO ledger_runtime, ledger_migrator;
+GRANT USAGE ON SCHEMA public TO ledger_runtime, ledger_migrator, ledger_approver_login;
