@@ -41,3 +41,8 @@ application-*.local.properties
 *.pem
 *.key
 secrets/
+
+# Local database backups
+ledger-before-role-separation.dump
+
+ledger-phase1-presecurity.dump
