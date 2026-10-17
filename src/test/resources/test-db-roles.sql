@@ -29,4 +29,3 @@ GRANT CONNECT ON DATABASE ledger TO ledger_runtime, ledger_migrator;
 
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 GRANT USAGE ON SCHEMA public TO ledger_runtime, ledger_migrator;
-GRANT CREATE ON SCHEMA public TO ledger_executor;

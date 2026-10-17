@@ -431,7 +431,7 @@ END;
 $function$;
 
 -- Give the controlled posting path a separate, non-login owner.
-GRANT USAGE, CREATE ON SCHEMA public TO ledger_executor;
+GRANT USAGE ON SCHEMA public TO ledger_executor;
 
 GRANT SELECT ON public.currencies, public.accounts,
     public.journal_transactions, public.journal_entries,
@@ -440,12 +440,14 @@ TO ledger_executor;
 
 GRANT UPDATE (code) ON public.currencies TO ledger_executor;
 
-GRANT UPDATE ON public.accounts TO ledger_executor;
-GRANT UPDATE ON public.journal_transactions TO ledger_executor;
+GRANT UPDATE (status) ON public.accounts TO ledger_executor;
+GRANT UPDATE (description) ON public.journal_transactions TO ledger_executor;
 
 GRANT INSERT ON public.journal_transactions, public.journal_entries,
     public.idempotency_records, public.reversal_audits
 TO ledger_executor;
+
+GRANT CREATE ON SCHEMA public TO ledger_executor;
 
 ALTER FUNCTION public.guard_currency_update() OWNER TO ledger_executor;
 ALTER FUNCTION public.guard_account_identity() OWNER TO ledger_executor;
@@ -453,6 +455,8 @@ ALTER FUNCTION public.reject_financial_mutation() OWNER TO ledger_executor;
 ALTER FUNCTION public.post_journal_transaction(
     TEXT, TEXT, TEXT, VARCHAR, TEXT, JSONB, UUID, TEXT, TEXT
 ) OWNER TO ledger_executor;
+
+REVOKE CREATE ON SCHEMA public FROM ledger_executor;
 
 REVOKE ALL ON FUNCTION public.guard_currency_update() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_account_identity() FROM PUBLIC;
