@@ -46,3 +46,6 @@ secrets/
 ledger-before-role-separation.dump
 
 ledger-phase1-presecurity.dump
+
+# Local database backups
+/backups/
