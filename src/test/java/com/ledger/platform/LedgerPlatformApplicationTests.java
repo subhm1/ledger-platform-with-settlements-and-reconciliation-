@@ -2,6 +2,12 @@
 package com.ledger.platform;
 
 import org.flywaydb.core.Flyway;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.JsonNode;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -22,6 +28,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @SpringBootTest
+@AutoConfigureMockMvc
 @Testcontainers
 class LedgerPlatformApplicationTests {
 
@@ -36,6 +43,12 @@ class LedgerPlatformApplicationTests {
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
+
+    @Autowired
+    private MockMvc mockMvc;
+
+    @Autowired
+    private ObjectMapper objectMapper;
 
     @Autowired
     private Flyway flyway;
@@ -422,4 +435,133 @@ class LedgerPlatformApplicationTests {
         assertThat(flyway.info().current().getVersion().getVersion())
                 .isEqualTo("2");
     }
+
+    private String requestBody(
+            String scope, String key, String reference, long debit, long credit) {
+        return """
+            {
+              "scope": "%s",
+              "idempotencyKey": "%s",
+              "transactionReference": "%s",
+              "currencyCode": "INR",
+              "description": "API integration test",
+              "entries": [
+                {"accountId": "%s", "direction": "DEBIT", "amountMinor": %d},
+                {"accountId": "%s", "direction": "CREDIT", "amountMinor": %d}
+              ]
+            }
+            """.formatted(scope, key, reference,
+                ASSET_ACCOUNT, debit, LIABILITY_ACCOUNT, credit);
+    }
+
+    @Test
+    void validPostingReturnsPostedTransactionAndPersistsEntries() throws Exception {
+        String reference = UUID.randomUUID().toString();
+        String body = requestBody(UUID.randomUUID().toString(),
+                UUID.randomUUID().toString(), reference, 100, 100);
+
+        String response = mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/v1/journal-transactions")
+                        .contentType("application/json").content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.transactionId").isNotEmpty())
+                .andExpect(jsonPath("$.transactionReference").value(reference))
+                .andExpect(jsonPath("$.currencyCode").value("INR"))
+                .andExpect(jsonPath("$.status").value("POSTED"))
+                .andReturn().getResponse().getContentAsString();
+
+        JsonNode json = objectMapper.readTree(response);
+        UUID id = UUID.fromString(json.get("transactionId").asText());
+
+        Long entries = jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM public.journal_entries WHERE transaction_id = ?",
+                Long.class, id);
+        assertThat(entries).isEqualTo(2L);
+    }
+
+    @Test
+    void sameIdempotencyKeyAndSameRequestReturnsSameTransaction() throws Exception {
+        String scope = UUID.randomUUID().toString();
+        String key = UUID.randomUUID().toString();
+        String body = requestBody(scope, key, UUID.randomUUID().toString(), 100, 100);
+
+        String first = mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/v1/journal-transactions")
+                        .contentType("application/json").content(body))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+
+        String second = mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/v1/journal-transactions")
+                        .contentType("application/json").content(body))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+
+        assertThat(objectMapper.readTree(second).get("transactionId").asText())
+                .isEqualTo(objectMapper.readTree(first).get("transactionId").asText());
+    }
+
+    @Test
+    void unbalancedRequestReturns422WithoutPersistingTransaction() throws Exception {
+        String reference = UUID.randomUUID().toString();
+        String body = requestBody(UUID.randomUUID().toString(),
+                UUID.randomUUID().toString(), reference, 100, 90);
+
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/v1/journal-transactions")
+                        .contentType("application/json").content(body))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.code").value("UNBALANCED_TRANSACTION"));
+
+        Long count = jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM public.journal_transactions WHERE transaction_reference = ?",
+                Long.class, reference);
+        assertThat(count).isZero();
+    }
+
+    @Test
+    void malformedJsonReturns400WithSanitizedError() throws Exception {
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/v1/journal-transactions")
+                        .contentType("application/json").content("{not-json"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_REQUEST"))
+                .andExpect(jsonPath("$.message").value("Request body is missing or malformed."));
+    }
+
+
+    @Test
+    void idempotencyKeyReuseWithDifferentRequestReturns409() throws Exception {
+        String scope = UUID.randomUUID().toString();
+        String key = UUID.randomUUID().toString();
+        String reference = UUID.randomUUID().toString();
+
+        String originalBody = requestBody(scope, key, reference, 100, 100);
+        String conflictingBody = requestBody(scope, key, reference, 200, 200);
+
+        mockMvc.perform(
+                        org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                                .post("/api/v1/journal-transactions")
+                                .contentType("application/json")
+                                .content(originalBody))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(
+                        org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                                .post("/api/v1/journal-transactions")
+                                .contentType("application/json")
+                                .content(conflictingBody))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("IDEMPOTENCY_CONFLICT"));
+
+        Long transactions = jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM public.journal_transactions WHERE transaction_reference = ?",
+                Long.class, reference);
+        assertThat(transactions).isEqualTo(1L);
+
+        Long entries = jdbcTemplate.queryForObject(
+                """
+                SELECT count(*)
+                FROM public.journal_entries e
+                JOIN public.journal_transactions t ON t.id = e.transaction_id
+                WHERE t.transaction_reference = ?
+                """,
+                Long.class, reference);
+        assertThat(entries).isEqualTo(2L);
+     }
 }
