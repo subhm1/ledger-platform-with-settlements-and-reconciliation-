@@ -23,6 +23,11 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.Statement;
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -407,6 +412,308 @@ class LedgerPlatformApplicationTests {
         }
     }
 
+    private UUID createWallet(String ownerReference) {
+        return jdbcTemplate.queryForObject(
+                "SELECT public.create_wallet(?, ?)",
+                UUID.class,
+                ownerReference,
+                "INR"
+        );
+    }
+
+    private String walletField(UUID walletId, String sql) {
+        String url = postgres.getJdbcUrl()
+                + "&options=-c%20TimeZone=Asia/Kolkata";
+
+        try (Connection connection = DriverManager.getConnection(
+                    url, "ledger_migrator", "local_migrator_password")) {
+            connection.setAutoCommit(true);
+
+            try (Statement statement = connection.createStatement()) {
+                statement.execute("SET ROLE ledger_owner");
+            }
+
+            try (java.sql.PreparedStatement query =
+                         connection.prepareStatement(sql)) {
+                query.setObject(1, walletId);
+
+                try (java.sql.ResultSet result = query.executeQuery()) {
+                    if (!result.next()) {
+                        throw new IllegalStateException(
+                                "Wallet inspection query returned no row");
+                    }
+                    return result.getString(1);
+                }
+            }
+        } catch (java.sql.SQLException exception) {
+            throw new IllegalStateException(
+                    "Test-only wallet inspection failed", exception);
+        }
+    }
+
+    private UUID walletAccount(UUID walletId) {
+        return UUID.fromString(walletField(
+                walletId,
+                "SELECT account_id::text FROM public.wallets WHERE id = ?"
+        ));
+    }
+
+    private long walletBalance(UUID walletId) {
+        String url = postgres.getJdbcUrl()
+                + "&options=-c%20TimeZone=Asia/Kolkata";
+
+        try (Connection connection = DriverManager.getConnection(
+                    url, "ledger_migrator", "local_migrator_password")) {
+            try (Statement statement = connection.createStatement()) {
+                statement.execute("SET ROLE ledger_owner");
+            }
+
+            try (java.sql.PreparedStatement query = connection.prepareStatement(
+                    """
+                    SELECT COALESCE(SUM(
+                        CASE e.direction
+                            WHEN 'CREDIT' THEN e.amount_minor::NUMERIC
+                            ELSE -e.amount_minor::NUMERIC
+                        END
+                    ), 0)
+                    FROM public.journal_entries e
+                    WHERE e.account_id = (
+                        SELECT w.account_id
+                        FROM public.wallets w
+                        WHERE w.id = ?
+                    )
+                    """)) {
+                query.setObject(1, walletId);
+
+                try (java.sql.ResultSet result = query.executeQuery()) {
+                    result.next();
+                    return result.getBigDecimal(1).longValueExact();
+                }
+            }
+        } catch (java.sql.SQLException exception) {
+            throw new IllegalStateException(
+                    "Test-only wallet balance inspection failed", exception);
+        }
+    }
+
+    private void fundWallet(UUID walletId, long amount) {
+        String entries = """
+            [
+              {"account_id":"%s","direction":"DEBIT","amount_minor":%d},
+              {"account_id":"%s","direction":"CREDIT","amount_minor":%d}
+            ]
+            """.formatted(
+                ASSET_ACCOUNT,
+                amount,
+                walletAccount(walletId),
+                amount
+            );
+
+        post(
+                UUID.randomUUID().toString(),
+                UUID.randomUUID().toString(),
+                UUID.randomUUID().toString(),
+                entries,
+                null
+        );
+    }
+
+    private UUID transfer(
+            String scope,
+            String key,
+            String reference,
+            UUID source,
+            UUID destination,
+            long amount,
+            String description) {
+        return jdbcTemplate.queryForObject(
+                """
+                SELECT public.transfer_between_wallets(
+                    ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                UUID.class,
+                scope,
+                key,
+                reference,
+                source,
+                destination,
+                amount,
+                description
+        );
+    }
+
+    @Test
+    void walletCreationCreatesCustomerWalletAccount() {
+        UUID walletId = createWallet("owner-" + UUID.randomUUID());
+
+        assertThat(walletField(
+                walletId,
+                "SELECT status FROM public.wallets WHERE id = ?"
+        )).isEqualTo("ACTIVE");
+
+        assertThat(walletField(
+                walletId,
+                "SELECT account_role FROM public.accounts WHERE id = (SELECT account_id FROM public.wallets WHERE id = ?)"
+        )).isEqualTo("CUSTOMER_WALLET");
+
+        assertThat(walletBalance(walletId)).isZero();
+    }
+
+    @Test
+    void successfulTransferMovesFundsBetweenWallets() {
+        UUID source = createWallet("source-" + UUID.randomUUID());
+        UUID destination = createWallet("destination-" + UUID.randomUUID());
+        fundWallet(source, 500);
+
+        transfer(
+                UUID.randomUUID().toString(),
+                UUID.randomUUID().toString(),
+                UUID.randomUUID().toString(),
+                source,
+                destination,
+                200,
+                "Wallet transfer"
+        );
+
+        assertThat(walletBalance(source)).isEqualTo(300);
+        assertThat(walletBalance(destination)).isEqualTo(200);
+    }
+
+    @Test
+    void transferRejectsInsufficientFunds() {
+        UUID source = createWallet("source-" + UUID.randomUUID());
+        UUID destination = createWallet("destination-" + UUID.randomUUID());
+
+        assertThatThrownBy(() -> transfer(
+                UUID.randomUUID().toString(),
+                UUID.randomUUID().toString(),
+                UUID.randomUUID().toString(),
+                source,
+                destination,
+                1,
+                "Insufficient funds test"
+        )).isInstanceOf(DataAccessException.class)
+          .hasMessageContaining("Insufficient wallet funds");
+
+        assertThat(walletBalance(source)).isZero();
+        assertThat(walletBalance(destination)).isZero();
+    }
+
+    @Test
+    void idempotentRetrySucceedsAfterSourceFundsAreExhausted() {
+        UUID source = createWallet("source-" + UUID.randomUUID());
+        UUID destination = createWallet("destination-" + UUID.randomUUID());
+        fundWallet(source, 100);
+
+        String scope = UUID.randomUUID().toString();
+        String key = UUID.randomUUID().toString();
+        String reference = UUID.randomUUID().toString();
+
+        UUID first = transfer(
+                scope, key, reference, source, destination, 100,
+                "Idempotent wallet transfer"
+        );
+
+        UUID retry = transfer(
+                scope, key, reference, source, destination, 100,
+                "Idempotent wallet transfer"
+        );
+
+        assertThat(retry).isEqualTo(first);
+        assertThat(walletBalance(source)).isZero();
+        assertThat(walletBalance(destination)).isEqualTo(100);
+    }
+
+    @Test
+    void directPostingCannotOverdrawWallet() {
+        UUID walletId = createWallet("owner-" + UUID.randomUUID());
+
+        String entries = """
+            [
+              {"account_id":"%s","direction":"DEBIT","amount_minor":100},
+              {"account_id":"%s","direction":"CREDIT","amount_minor":100}
+            ]
+            """.formatted(walletAccount(walletId), ASSET_ACCOUNT);
+
+        assertThatThrownBy(() -> post(
+                UUID.randomUUID().toString(),
+                UUID.randomUUID().toString(),
+                UUID.randomUUID().toString(),
+                entries,
+                null
+        )).isInstanceOf(DataAccessException.class)
+          .hasMessageContaining("Insufficient wallet funds");
+
+        assertThat(walletBalance(walletId)).isZero();
+    }
+
+
+    @Test
+    void concurrentTransfersCannotOverdrawWallet() throws Exception {
+        UUID source = createWallet("concurrent-source-" + UUID.randomUUID());
+        UUID destinationOne = createWallet("concurrent-destination-one-" + UUID.randomUUID());
+        UUID destinationTwo = createWallet("concurrent-destination-two-" + UUID.randomUUID());
+        fundWallet(source, 100);
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        java.util.concurrent.CountDownLatch ready = new java.util.concurrent.CountDownLatch(2);
+        java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+
+        Callable<Boolean> transferOne = () -> {
+            ready.countDown();
+            start.await();
+            try {
+                transfer(UUID.randomUUID().toString(), UUID.randomUUID().toString(),
+                        UUID.randomUUID().toString(), source, destinationOne, 80,
+                        "Concurrent wallet transfer one");
+                return true;
+            } catch (DataAccessException exception) {
+                if (exception.getMessage() != null
+                        && exception.getMessage().contains("Insufficient wallet funds")) {
+                    return false;
+                }
+                throw exception;
+            }
+        };
+
+        Callable<Boolean> transferTwo = () -> {
+            ready.countDown();
+            start.await();
+            try {
+                transfer(UUID.randomUUID().toString(), UUID.randomUUID().toString(),
+                        UUID.randomUUID().toString(), source, destinationTwo, 80,
+                        "Concurrent wallet transfer two");
+                return true;
+            } catch (DataAccessException exception) {
+                if (exception.getMessage() != null
+                        && exception.getMessage().contains("Insufficient wallet funds")) {
+                    return false;
+                }
+                throw exception;
+            }
+        };
+
+        try {
+            Future<Boolean> first = executor.submit(transferOne);
+            Future<Boolean> second = executor.submit(transferTwo);
+
+            assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+
+            boolean firstSucceeded = first.get(30, TimeUnit.SECONDS);
+            boolean secondSucceeded = second.get(30, TimeUnit.SECONDS);
+
+            assertThat(firstSucceeded).isNotEqualTo(secondSucceeded);
+            assertThat(walletBalance(source)).isEqualTo(20);
+            assertThat(walletBalance(destinationOne) + walletBalance(destinationTwo))
+                    .isEqualTo(80);
+        } finally {
+            start.countDown();
+            executor.shutdownNow();
+        }
+    }
+
     @Test
     void contextLoads() {
         assertThat(jdbcTemplate).isNotNull();
@@ -433,7 +740,7 @@ class LedgerPlatformApplicationTests {
         assertThat(databaseName).isEqualTo("ledger");
         assertThat(isSuperuser).isFalse();
         assertThat(flyway.info().current().getVersion().getVersion())
-                .isEqualTo("2");
+                .isEqualTo("3");
     }
 
     private String requestBody(
@@ -564,4 +871,52 @@ class LedgerPlatformApplicationTests {
                 Long.class, reference);
         assertThat(entries).isEqualTo(2L);
      }
+
+    @Test
+    void invalidCurrencyReturns400WithoutPersistingTransaction() throws Exception {
+        String reference = UUID.randomUUID().toString();
+        String body = requestBody(
+                UUID.randomUUID().toString(),
+                UUID.randomUUID().toString(),
+                reference, 100, 100)
+                .replace("\"currencyCode\": \"INR\"",
+                         "\"currencyCode\": \"inr\"");
+
+        mockMvc.perform(
+                        org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                                .post("/api/v1/journal-transactions")
+                                .contentType("application/json")
+                                .content(body))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_CURRENCY_CODE"));
+
+        Long count = jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM public.journal_transactions WHERE transaction_reference = ?",
+                Long.class, reference);
+        assertThat(count).isZero();
+    }
+
+    @Test
+    void zeroEntryAmountReturns400WithoutPersistingTransaction() throws Exception {
+        String reference = UUID.randomUUID().toString();
+        String body = requestBody(
+                UUID.randomUUID().toString(),
+                UUID.randomUUID().toString(),
+                reference, 100, 100)
+                .replace("\"amountMinor\": 100",
+                         "\"amountMinor\": 0");
+
+        mockMvc.perform(
+                        org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                                .post("/api/v1/journal-transactions")
+                                .contentType("application/json")
+                                .content(body))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_AMOUNT"));
+
+        Long count = jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM public.journal_transactions WHERE transaction_reference = ?",
+                Long.class, reference);
+        assertThat(count).isZero();
+    }
 }
