@@ -295,12 +295,15 @@ function Receipt({ receipt, copied, onCopy, onNew }: {
         {copied && <span role="status" className="muted">Copied</span>}
       </div>
 
-      <div className="receipt-illustration" aria-label="Illustrative SBI branding, not a connected bank">
-        <div><span className="receipt-recipient-label">Illustrative bank image</span>
-          <Image src="/brands/sbi.svg" alt="State Bank of India logo, shown for illustration only" width={154} height={53} />
-        </div>
-        <strong>Not an SBI transaction</strong>
-        <p>No SBI account is connected; this app moved simulated balances only.</p>
+      <div className="receipt-brand-card" aria-label="State Bank of India">
+        <Image
+          src="/brands/sbi.png"
+          alt="State Bank of India logo"
+          width={120}
+          height={80}
+          style={{ height: 42, width: "auto", objectFit: "contain", display: "block" }}
+          priority
+        />
       </div>
 
       <section className="receipt-ledger" aria-labelledby="receipt-ledger-title">

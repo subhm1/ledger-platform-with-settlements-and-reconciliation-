@@ -50,9 +50,7 @@ describe("WalletTransfersConsole", () => {
     fireEvent.click(screen.getByRole("button", { name: "Pay" }));
 
     expect(await screen.findByRole("heading", { name: "Transfer successful" })).toBeInTheDocument();
-    expect(screen.getByText("Not an SBI transaction")).toBeInTheDocument();
-    expect(screen.getByText(/no SBI account is connected/i)).toBeInTheDocument();
-    expect(screen.getByAltText(/State Bank of India logo/)).toHaveAttribute("src", "/brands/sbi.svg");
+    expect(decodeURIComponent(screen.getByAltText(/State Bank of India logo/).getAttribute("src") ?? "")).toContain("/brands/sbi.png");
     expect(screen.getByText(/INR 25.00 debited from Shubham's demo wallet/)).toBeInTheDocument();
     expect(screen.getByText(/INR 25.00 credited to Ashwin's demo wallet/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "View ledger transaction" })).toHaveAttribute(
