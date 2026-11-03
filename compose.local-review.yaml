@@ -1,0 +1,39 @@
+services:
+  postgres:
+    build:
+      context: .
+      dockerfile: Dockerfile.local-review-db
+    image: ledger-platform-local-review-db:phase61
+    container_name: ledger-phase61-review-postgres
+    environment:
+      POSTGRES_USER: ledger_bootstrap
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.local-review}
+      LEDGER_DB_PASSWORD: ${LEDGER_DB_PASSWORD:?Set LEDGER_DB_PASSWORD in .env.local-review}
+      LEDGER_FLYWAY_PASSWORD: ${LEDGER_FLYWAY_PASSWORD:?Set LEDGER_FLYWAY_PASSWORD in .env.local-review}
+    ports: !override []
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledger_bootstrap -d ledger"]
+    restart: unless-stopped
+
+  backend:
+    environment:
+      LEDGER_DB_USER: ledger_runtime
+      LEDGER_DB_PASSWORD: ${LEDGER_DB_PASSWORD:?Set LEDGER_DB_PASSWORD in .env.local-review}
+      LEDGER_FLYWAY_USER: ledger_migrator
+      LEDGER_FLYWAY_PASSWORD: ${LEDGER_FLYWAY_PASSWORD:?Set LEDGER_FLYWAY_PASSWORD in .env.local-review}
+      LEDGER_FLYWAY_URL: jdbc:postgresql://postgres:5432/ledger?options=-c%20TimeZone=Asia/Kolkata
+      SPRING_FLYWAY_ENABLED: "true"
+      LEDGER_OPERATOR_USERNAME: ${LEDGER_OPERATOR_USERNAME:?Set LEDGER_OPERATOR_USERNAME in .env.local-review}
+      LEDGER_OPERATOR_PASSWORD: ${LEDGER_OPERATOR_PASSWORD:?Set LEDGER_OPERATOR_PASSWORD in .env.local-review}
+      LEDGER_RAZORPAY_WEBHOOK_SECRET: ${LEDGER_RAZORPAY_WEBHOOK_SECRET:-}
+    restart: unless-stopped
+
+  frontend:
+    environment:
+      LEDGER_OPERATOR_USERNAME: ${LEDGER_OPERATOR_USERNAME:?Set LEDGER_OPERATOR_USERNAME in .env.local-review}
+      LEDGER_OPERATOR_PASSWORD: ${LEDGER_OPERATOR_PASSWORD:?Set LEDGER_OPERATOR_PASSWORD in .env.local-review}
+      LEDGER_SESSION_SECRET: ${LEDGER_SESSION_SECRET:?Set LEDGER_SESSION_SECRET in .env.local-review}
+      LEDGER_APP_ORIGIN: ${LEDGER_APP_ORIGIN:-http://127.0.0.1:3000}
+    restart: unless-stopped

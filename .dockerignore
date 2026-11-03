@@ -1,0 +1,13 @@
+.git
+.m2-local
+target
+backups
+*.dump
+hs_err_pid*.log
+replay_pid*.log
+frontend/node_modules
+frontend/.next
+frontend/coverage
+.env
+.env.*
+!.env.example

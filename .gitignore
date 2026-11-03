@@ -49,3 +49,16 @@ ledger-phase1-presecurity.dump
 
 # Local database backups
 /backups/
+
+# Local Maven dependency cache
+/.m2-local/
+/frontend/node_modules/
+/frontend/.next/
+
+# JVM crash logs and temporary backups
+hs_err_pid*.log
+replay_pid*.log
+*.bak
+*.before-*
+
+*.tsbuildinfo

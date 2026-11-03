@@ -5,9 +5,9 @@ services:
     environment:
       POSTGRES_DB: ledger
       POSTGRES_USER: ledger_app
-      POSTGRES_PASSWORD: local_dev_password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql
     healthcheck:
@@ -16,5 +16,57 @@ services:
       timeout: 5s
       retries: 10
 
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      LEDGER_DB_URL: jdbc:postgresql://postgres:5432/ledger?options=-c%20TimeZone=Asia/Kolkata
+      LEDGER_DB_USER: ${LEDGER_DB_USER:-ledger_runtime}
+      LEDGER_DB_PASSWORD: ${LEDGER_DB_PASSWORD:?Set LEDGER_DB_PASSWORD in .env}
+      LEDGER_FLYWAY_USER: ${LEDGER_FLYWAY_USER:-ledger_migrator}
+      LEDGER_FLYWAY_PASSWORD: ${LEDGER_FLYWAY_PASSWORD:-}
+      LEDGER_OPERATOR_USERNAME: ${LEDGER_OPERATOR_USERNAME:?Set LEDGER_OPERATOR_USERNAME in .env}
+      LEDGER_OPERATOR_PASSWORD: ${LEDGER_OPERATOR_PASSWORD:?Set LEDGER_OPERATOR_PASSWORD in .env}
+      LEDGER_RAZORPAY_KEY_ID: ${LEDGER_RAZORPAY_KEY_ID:-}
+      LEDGER_RAZORPAY_API_SECRET: ${LEDGER_RAZORPAY_API_SECRET:-}
+      LEDGER_RAZORPAY_WEBHOOK_SECRET: ${LEDGER_RAZORPAY_WEBHOOK_SECRET:-}
+      SPRING_FLYWAY_ENABLED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8080/actuator/health/readiness"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 45s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    environment:
+      LEDGER_API_BASE_URL: http://backend:8080
+      LEDGER_OPERATOR_USERNAME: ${LEDGER_OPERATOR_USERNAME:?Set LEDGER_OPERATOR_USERNAME in .env}
+      LEDGER_OPERATOR_PASSWORD: ${LEDGER_OPERATOR_PASSWORD:?Set LEDGER_OPERATOR_PASSWORD in .env}
+      LEDGER_SESSION_SECRET: ${LEDGER_SESSION_SECRET:?Set LEDGER_SESSION_SECRET in .env}
+      LEDGER_APP_ORIGIN: ${LEDGER_APP_ORIGIN:-http://127.0.0.1:3000}
+      NODE_ENV: production
+    ports:
+      - "127.0.0.1:${LEDGER_UI_PORT:-3000}:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/transactions').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
 volumes:
   postgres_data:
+
