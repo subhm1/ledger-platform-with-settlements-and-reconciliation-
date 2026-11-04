@@ -39,7 +39,11 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible { 
 @media(max-width:900px) { .sidebar { width:68px; padding:18px 9px; }.brand { padding:2px 10px 30px; }.brand>span:last-child,.nav-caption,.nav-link span,.sidebar-bottom { display:none; }.nav-link { justify-content:center; padding:11px; }.main-area { margin-left:68px; }.page-container { padding:28px 22px 44px; }.topbar { padding:0 22px; }.split-layout { grid-template-columns:1fr; } }
 @media(max-width:640px) { .page-container { padding:22px 13px 36px; }.topbar { height:54px; padding:0 13px; }.theme-button span { display:none; }.page-heading { margin-bottom:18px; }.page-heading h1 { font-size:22px; }.toolbar { flex-wrap:wrap; }.toolbar-spacer { display:none; }.search-field { flex:1; }.search-field input { width:100%; }.field { min-width:130px; flex:1; }.summary-grid,.health-grid { grid-template-columns:1fr; }.summary-grid { gap:8px; }.summary-card { padding:13px; }.summary-card strong { font-size:18px; }.upload-grid { grid-template-columns:1fr; }.upload-grid .wide { grid-column:auto; }.table-footer { align-items:flex-start; flex-direction:column; } }
 
+.page-heading-actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
 .wallet-simulation-notice { display:flex; align-items:center; gap:10px; margin-bottom:18px; }
+.wallet-action-feedback { display:flex; align-items:center; gap:10px; margin-bottom:18px; border-radius:6px; padding:11px 13px; font-size:12px; }
+.wallet-action-feedback.info { background:var(--surface-2); border:1px solid var(--border); color:var(--text); }
+.wallet-action-feedback.success { background:var(--green-bg); border:1px solid color-mix(in srgb, var(--green) 35%, transparent); color:var(--green); }
 .wallet-simulation-notice span { line-height:1.5; }
 .wallet-transfer-layout { display:grid; grid-template-columns:minmax(0,1.2fr) minmax(280px,.8fr); gap:15px; align-items:start; }
 .wallet-transfer-form { margin-top:16px; }

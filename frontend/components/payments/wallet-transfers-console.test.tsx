@@ -97,4 +97,77 @@ describe("WalletTransfersConsole", () => {
     expect(secondKey).toBe(firstKey);
     expect(window.sessionStorage.getItem("ledger-wallet-transfer-pending")).toBeNull();
   });
+
+  it("refreshes balances and shows feedback timestamp", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(response(walletList))
+      .mockResolvedValueOnce(response(walletList));
+
+    render(<WalletTransfersConsole />);
+    await screen.findByText("Simulated wallet transfer");
+    const refreshButton = screen.getByRole("button", { name: /Refresh balances/i });
+    fireEvent.click(refreshButton);
+
+    expect(await screen.findByText(/Balances refreshed from ledger at/)).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports when all demo wallets are already at 100 INR on reset", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(response(walletList))
+      .mockResolvedValueOnce(response(walletList));
+
+    render(<WalletTransfersConsole />);
+    await screen.findByText("Simulated wallet transfer");
+    const resetButton = screen.getByRole("button", { name: /Reset demo balances/i });
+    fireEvent.click(resetButton);
+
+    expect(await screen.findByText("All 5 demo wallets are already at INR 100.00.")).toBeInTheDocument();
+    const posts = fetchMock.mock.calls.filter((call) => (call[1] as RequestInit | undefined)?.method === "POST");
+    expect(posts).toHaveLength(0);
+  });
+
+  it("resets uneven demo balances back to 100 INR using compensating double-entry transfers", async () => {
+    vi.stubGlobal("crypto", { randomUUID: vi.fn().mockReturnValue("reset-key") });
+    const unevenWallets = [
+      { walletId: "wallet-shubham", displayName: "Shubham", currencyCode: "INR", minorUnitExponent: 2, status: "ACTIVE", balanceMinor: "7900" },
+      { walletId: "wallet-ashwin", displayName: "Ashwin", currencyCode: "INR", minorUnitExponent: 2, status: "ACTIVE", balanceMinor: "12100" },
+      { walletId: "wallet-arnav", displayName: "Arnav", currencyCode: "INR", minorUnitExponent: 2, status: "ACTIVE", balanceMinor: "10000" },
+      { walletId: "wallet-shreya", displayName: "Shreya", currencyCode: "INR", minorUnitExponent: 2, status: "ACTIVE", balanceMinor: "10000" },
+      { walletId: "wallet-swati", displayName: "Swati", currencyCode: "INR", minorUnitExponent: 2, status: "ACTIVE", balanceMinor: "10000" },
+    ];
+
+    const resetReceipt = {
+      ...receipt,
+      sourceWalletId: "wallet-ashwin",
+      sourceName: "Ashwin",
+      destinationWalletId: "wallet-shubham",
+      destinationName: "Shubham",
+      amountMinor: "2100",
+    };
+
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(response(unevenWallets))
+      .mockResolvedValueOnce(response(unevenWallets))
+      .mockResolvedValueOnce(response(resetReceipt, 201))
+      .mockResolvedValueOnce(response(walletList));
+
+    render(<WalletTransfersConsole />);
+    await screen.findByText("Simulated wallet transfer");
+    expect(screen.getByText("INR 79.00")).toBeInTheDocument();
+    expect(screen.getByText("INR 121.00")).toBeInTheDocument();
+
+    const resetButton = screen.getByRole("button", { name: /Reset demo balances/i });
+    fireEvent.click(resetButton);
+
+    expect(await screen.findByText("All 5 demo wallets restored to INR 100.00 via balanced ledger transactions.")).toBeInTheDocument();
+    const posts = fetchMock.mock.calls.filter((call) => (call[1] as RequestInit | undefined)?.method === "POST");
+    expect(posts).toHaveLength(1);
+    expect(JSON.parse(String((posts[0][1] as RequestInit).body))).toMatchObject({
+      sourceWalletId: "wallet-ashwin",
+      destinationWalletId: "wallet-shubham",
+      amountMinor: 2100,
+      reference: "Demo balance reset to INR 100.00",
+    });
+  });
 });

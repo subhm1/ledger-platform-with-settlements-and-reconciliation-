@@ -1,9 +1,9 @@
 "use client";
 
-import { ArrowRight, Check, Copy, LoaderCircle, RefreshCw, ShieldAlert } from "lucide-react";
+import { ArrowRight, Check, Copy, LoaderCircle, RefreshCw, RotateCcw, ShieldAlert } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ErrorState, Loading } from "@/components/ui/feedback";
 import { ApiClientError, apiGet, apiPostJson } from "@/lib/api/client";
 import type { DemoWallet, WalletTransferReceipt } from "@/lib/api/types";
@@ -36,12 +36,19 @@ type Submission = {
   reference: string;
 };
 
+type ActionFeedback = {
+  type: "info" | "success";
+  message: string;
+};
+
 export function WalletTransfersConsole() {
   const [wallets, setWallets] = useState<DemoWallet[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
-  const [reloadKey, setReloadKey] = useState(0);
+  const [resetting, setResetting] = useState(false);
+  const [actionFeedback, setActionFeedback] = useState<ActionFeedback | null>(null);
+  const feedbackTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [sourceId, setSourceId] = useState("");
   const [destinationId, setDestinationId] = useState("");
   const [amount, setAmount] = useState("");
@@ -54,27 +61,42 @@ export function WalletTransfersConsole() {
   const inFlight = useRef(false);
   const selectedSourceId = useRef("");
 
+  const showFeedback = useCallback((type: "info" | "success", message: string, durationMs = 4500) => {
+    if (feedbackTimeout.current) clearTimeout(feedbackTimeout.current);
+    setActionFeedback({ type, message });
+    feedbackTimeout.current = setTimeout(() => {
+      setActionFeedback(null);
+      feedbackTimeout.current = null;
+    }, durationMs);
+  }, []);
+
+  const applyWallets = useCallback((currentWallets: DemoWallet[]) => {
+    setWallets(currentWallets);
+    const nextSourceId = selectedSourceId.current && currentWallets.some((wallet) => wallet.walletId === selectedSourceId.current)
+      ? selectedSourceId.current : currentWallets[0]?.walletId ?? "";
+    selectedSourceId.current = nextSourceId;
+    setSourceId(nextSourceId);
+    setDestinationId((current) => current && current !== nextSourceId && currentWallets.some((wallet) => wallet.walletId === current)
+      ? current : currentWallets.find((wallet) => wallet.walletId !== nextSourceId)?.walletId ?? "");
+  }, []);
+
   useEffect(() => {
     const controller = new AbortController();
     apiGet<DemoWallet[]>("api/v1/wallets", controller.signal)
       .then((currentWallets) => {
-        setWallets(currentWallets);
-        const nextSourceId = selectedSourceId.current && currentWallets.some((wallet) => wallet.walletId === selectedSourceId.current)
-          ? selectedSourceId.current : currentWallets[0]?.walletId ?? "";
-        selectedSourceId.current = nextSourceId;
-        setSourceId(nextSourceId);
-        setDestinationId((current) => current && current !== nextSourceId && currentWallets.some((wallet) => wallet.walletId === current)
-          ? current : currentWallets.find((wallet) => wallet.walletId !== nextSourceId)?.walletId ?? "");
+        applyWallets(currentWallets);
       })
       .catch((reason: unknown) => {
         if (!(reason instanceof Error && reason.name === "AbortError")) setLoadError(errorText(reason));
       })
       .finally(() => {
         setLoading(false);
-        setRefreshing(false);
       });
-    return () => controller.abort();
-  }, [reloadKey]);
+    return () => {
+      controller.abort();
+      if (feedbackTimeout.current) clearTimeout(feedbackTimeout.current);
+    };
+  }, [applyWallets]);
 
   useEffect(() => {
     try {
@@ -104,10 +126,89 @@ export function WalletTransfersConsole() {
     }
   }, []);
 
-  function refreshWallets() {
+  async function refreshWallets() {
+    setReceipt(null);
+    setFormError("");
     setLoadError("");
     setRefreshing(true);
-    setReloadKey((current) => current + 1);
+    const start = Date.now();
+    try {
+      const currentWallets = await apiGet<DemoWallet[]>("api/v1/wallets");
+      const elapsed = Date.now() - start;
+      if (elapsed < 500) {
+        await new Promise((resolve) => setTimeout(resolve, 500 - elapsed));
+      }
+      applyWallets(currentWallets);
+      const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      showFeedback("info", `Balances refreshed from ledger at ${time}.`);
+    } catch (reason: unknown) {
+      setLoadError(errorText(reason));
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  async function resetDemoBalances() {
+    setReceipt(null);
+    setFormError("");
+    setResetting(true);
+    const targetPaise = 10000;
+    try {
+      const currentWallets = await apiGet<DemoWallet[]>("api/v1/wallets");
+      applyWallets(currentWallets);
+      const needsReset = currentWallets.some((w) => Number(w.balanceMinor) !== targetPaise);
+      if (!needsReset) {
+        showFeedback("info", "All 5 demo wallets are already at INR 100.00.");
+        setResetting(false);
+        return;
+      }
+
+      type BalanceDiff = { walletId: string; displayName: string; amount: number };
+      const surpluses: BalanceDiff[] = [];
+      const deficits: BalanceDiff[] = [];
+
+      for (const w of currentWallets) {
+        const bal = Number(w.balanceMinor);
+        if (bal > targetPaise) {
+          surpluses.push({ walletId: w.walletId, displayName: w.displayName, amount: bal - targetPaise });
+        } else if (bal < targetPaise) {
+          deficits.push({ walletId: w.walletId, displayName: w.displayName, amount: targetPaise - bal });
+        }
+      }
+
+      while (surpluses.length > 0 && deficits.length > 0) {
+        const s = surpluses[0];
+        const d = deficits[0];
+        const transferAmount = Math.min(s.amount, d.amount);
+        const ref = "XFER-RESET-" + window.crypto.randomUUID();
+        const idempotencyKey = window.crypto.randomUUID();
+
+        await apiPostJson<WalletTransferReceipt>(
+          "api/v1/wallets/transfers",
+          {
+            sourceWalletId: s.walletId,
+            destinationWalletId: d.walletId,
+            amountMinor: transferAmount,
+            transactionReference: ref,
+            reference: "Demo balance reset to INR 100.00",
+          },
+          { "Idempotency-Key": idempotencyKey },
+        );
+
+        s.amount -= transferAmount;
+        d.amount -= transferAmount;
+        if (s.amount <= 0) surpluses.shift();
+        if (d.amount <= 0) deficits.shift();
+      }
+
+      const refreshed = await apiGet<DemoWallet[]>("api/v1/wallets");
+      applyWallets(refreshed);
+      showFeedback("success", "All 5 demo wallets restored to INR 100.00 via balanced ledger transactions.", 6000);
+    } catch (reason: unknown) {
+      setFormError(errorText(reason));
+    } finally {
+      setResetting(false);
+    }
   }
 
   const source = wallets.find((wallet) => wallet.walletId === sourceId);
@@ -178,8 +279,7 @@ export function WalletTransfersConsole() {
       submission.current = null;
       try { window.sessionStorage.removeItem("ledger-wallet-transfer-pending"); }
       catch { /* The committed result is already confirmed; storage cleanup is best effort. */ }
-      setRefreshing(true);
-      setReloadKey((current) => current + 1);
+      void apiGet<DemoWallet[]>("api/v1/wallets").then(applyWallets).catch(() => {});
     } catch (reason) {
       setFormError(errorText(reason) + " Retrying unchanged values reuses the same idempotency key.");
     } finally {
@@ -211,16 +311,40 @@ export function WalletTransfersConsole() {
         <h1>Payments</h1>
         <p>Move demo INR between the five seeded wallets and see the exact balanced ledger posting.</p>
       </div>
-      <button className="button secondary" type="button" onClick={refreshWallets} disabled={loading || refreshing}>
-        {refreshing ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />} Refresh balances
-      </button>
+      <div className="page-heading-actions">
+        <button
+          className="button secondary"
+          type="button"
+          onClick={() => void resetDemoBalances()}
+          disabled={loading || refreshing || resetting || submitting}
+          title="Restore all five demo wallets back to INR 100.00"
+        >
+          {resetting ? <LoaderCircle className="spin" size={14} /> : <RotateCcw size={14} />} Reset demo balances
+        </button>
+        <button
+          className="button secondary"
+          type="button"
+          onClick={() => void refreshWallets()}
+          disabled={loading || refreshing || resetting || submitting}
+          title="Fetch latest balances from the ledger"
+        >
+          {refreshing ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />} Refresh balances
+        </button>
+      </div>
     </div>
+
+    {actionFeedback && (
+      <div className={`notice wallet-action-feedback ${actionFeedback.type}`} role="status">
+        {actionFeedback.type === "success" ? <Check size={16} aria-hidden="true" /> : <RefreshCw size={14} aria-hidden="true" />}
+        <span>{actionFeedback.message}</span>
+      </div>
+    )}
 
     <div className="notice wallet-simulation-notice"><ShieldAlert size={16} aria-hidden="true" />
       <span>Demo balances only. No real bank account or external payment service is connected to this internal transfer.</span>
     </div>
 
-    {loadError ? <ErrorState message={loadError} onRetry={() => { setLoading(true); refreshWallets(); }} /> : loading
+    {loadError ? <ErrorState message={loadError} onRetry={() => { setLoading(true); void refreshWallets(); }} /> : loading
       ? <Loading label="Loading demo wallet balances" />
       : receipt ? <Receipt receipt={receipt} copied={copied} onCopy={() => void copyReference()} onNew={startAnother} />
         : <div className="wallet-transfer-layout">
